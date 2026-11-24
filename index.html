@@ -6,6 +6,7 @@
   <title>智光個人知識庫｜22 大領域分類學習與三層難度系統</title>
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -154,7 +155,11 @@
           <i data-lucide="type" class="w-4 h-4"></i>
           <span id="fontLabel" class="hidden xl:inline text-xs">標準字級</span>
         </button>
-        <button id="btnOpenBackup" type="button" class="btn-pill-ghost p-2 text-zinc-700" title="匯出與備份設定">
+        <button id="btnOpenDriveSync" type="button" class="btn-pill-ghost px-3 py-2 text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition" title="Google Drive 手動雲端同步">
+          <i data-lucide="cloud" class="w-4 h-4 text-sky-600 shrink-0"></i>
+          <span id="syncPillText" class="hidden sm:inline">雲端同步</span>
+        </button>
+        <button id="btnOpenBackup" type="button" class="btn-pill-ghost p-2 text-zinc-700" title="本機 JSON 匯出與重設">
           <i data-lucide="database" class="w-4 h-4"></i>
         </button>
       </div>
@@ -1301,7 +1306,14 @@
         reviewLevel: 'lv1',
         graphMode: 'cross',          // 'cross' | 'all' | groupId
         graphSelectedId: null,
-        graphQuery: ''
+        graphQuery: '',
+        googleClientId: '',
+        driveAccessToken: '',
+        driveTokenExpiresAt: 0,
+        lastSyncedAt: '',            // YYYYMMDD-HHmm
+        localModifiedAt: '',         // YYYYMMDD-HHmm
+        hasUnsyncedChanges: false,
+        remoteSyncTimestamp: ''
       };
 
       const FONT_SCALES = [
@@ -1335,7 +1347,7 @@
                   merged = true;
                 }
               });
-              if (merged) saveData();
+              if (merged) saveData(true);
             } else {
               resetToDefaultsInMemory();
             }
@@ -1349,6 +1361,10 @@
             if (typeof prefs.apiKey === 'string') state.apiKey = prefs.apiKey;
             if (['lv1', 'lv2', 'lv3'].includes(prefs.activeLevel)) state.activeLevel = prefs.activeLevel;
             if (typeof prefs.activeGroupId === 'string') state.activeGroupId = prefs.activeGroupId;
+            if (typeof prefs.googleClientId === 'string') state.googleClientId = prefs.googleClientId;
+            if (typeof prefs.lastSyncedAt === 'string') state.lastSyncedAt = prefs.lastSyncedAt;
+            if (typeof prefs.localModifiedAt === 'string') state.localModifiedAt = prefs.localModifiedAt;
+            if (typeof prefs.hasUnsyncedChanges === 'boolean') state.hasUnsyncedChanges = prefs.hasUnsyncedChanges;
           }
         } catch (e) {
           resetToDefaultsInMemory();
@@ -1362,13 +1378,45 @@
         state.cards = JSON.parse(JSON.stringify(DEFAULT_CARDS));
       }
 
-      function saveData() {
+      function formatTimestampNow() {
+        const d = new Date();
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return `${y}${m}${day}-${hh}${mm}`;
+      }
+
+      function updateSyncStatusPill() {
+        const btn = document.getElementById('btnOpenDriveSync');
+        const txt = document.getElementById('syncPillText');
+        if (!btn || !txt) return;
+        if (state.hasUnsyncedChanges) {
+          btn.className = 'px-3 py-2 rounded-full text-xs sm:text-sm font-semibold flex items-center gap-1.5 border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 transition';
+          txt.textContent = `待手動同步 (${state.localModifiedAt || formatTimestampNow()})`;
+        } else if (state.lastSyncedAt) {
+          btn.className = 'px-3 py-2 rounded-full text-xs sm:text-sm font-semibold flex items-center gap-1.5 border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition';
+          txt.textContent = `已同步 (${state.lastSyncedAt})`;
+        } else {
+          btn.className = 'btn-pill-ghost px-3 py-2 text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition';
+          txt.textContent = '雲端同步';
+        }
+      }
+
+      function saveData(skipMarkUnsynced) {
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify({
             groups: state.groups,
             categories: state.categories,
             cards: state.cards
           }));
+          if (!skipMarkUnsynced) {
+            state.localModifiedAt = formatTimestampNow();
+            state.hasUnsyncedChanges = true;
+            savePrefs();
+            updateSyncStatusPill();
+          }
         } catch (e) {}
       }
 
@@ -1378,7 +1426,11 @@
             fontScaleIndex: state.fontScaleIndex,
             apiKey: state.apiKey,
             activeLevel: state.activeLevel,
-            activeGroupId: state.activeGroupId
+            activeGroupId: state.activeGroupId,
+            googleClientId: state.googleClientId,
+            lastSyncedAt: state.lastSyncedAt,
+            localModifiedAt: state.localModifiedAt,
+            hasUnsyncedChanges: state.hasUnsyncedChanges
           }));
         } catch (e) {}
       }
@@ -3110,7 +3162,7 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = `zhiguang-kb-21domains-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.json`;
+          a.download = `zhiguang-kb-backup-${formatTimestampNow()}.json`;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
@@ -3128,6 +3180,381 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
             showToast('已還原預設知識庫');
             renderAll();
           });
+        });
+      }
+
+      // =========================================================================
+      // GOOGLE DRIVE MANUAL SYNC & SAFETY WORKFLOW (DriveNote v6 Architecture)
+      // =========================================================================
+      const DRIVE_FOLDER_NAME = 'ZhiGuangKB';
+      const DRIVE_BACKUP_FOLDER = 'backups';
+      const DRIVE_DATA_FILENAME = 'zhiguang_kb_data.json';
+      const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+
+      function hasValidDriveToken() {
+        return !!(state.driveAccessToken && Date.now() < state.driveTokenExpiresAt - 30000);
+      }
+
+      function requestDriveToken(promptMode) {
+        return new Promise((resolve, reject) => {
+          const cid = (state.googleClientId || '').trim();
+          if (!cid) {
+            reject(new Error('請先輸入並儲存 Google OAuth Client ID'));
+            return;
+          }
+          if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
+            reject(new Error('Google 登入元件尚未載入完成，請確認網路連線後重試'));
+            return;
+          }
+          try {
+            const client = window.google.accounts.oauth2.initTokenClient({
+              client_id: cid,
+              scope: DRIVE_SCOPE,
+              callback: (resp) => {
+                if (resp && resp.access_token) {
+                  state.driveAccessToken = resp.access_token;
+                  state.driveTokenExpiresAt = Date.now() + ((Number(resp.expires_in) || 3500) * 1000);
+                  resolve(resp.access_token);
+                } else {
+                  reject(new Error((resp && (resp.error_description || resp.error)) || 'Google 授權未完成'));
+                }
+              },
+              error_callback: (err) => {
+                reject(new Error((err && err.message) || 'Google 授權視窗已關閉或被阻擋'));
+              }
+            });
+            client.requestAccessToken({ prompt: promptMode || '' });
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+
+      async function getDriveTokenOrAuth() {
+        if (hasValidDriveToken()) return state.driveAccessToken;
+        return await requestDriveToken('');
+      }
+
+      async function driveFetch(token, url, options) {
+        const res = await fetch(url, Object.assign({}, options || {}, {
+          headers: Object.assign({ Authorization: 'Bearer ' + token }, (options && options.headers) || {})
+        }));
+        if (!res.ok) {
+          const txt = await res.text().catch(() => '');
+          throw new Error(`Google Drive API 錯誤 (${res.status}): ${txt.slice(0, 140)}`);
+        }
+        return res;
+      }
+
+      async function findOrCreateDriveFolder(token, folderName, parentId) {
+        const parentClause = parentId ? ` and '${parentId}' in parents` : ` and 'root' in parents`;
+        const q = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false${parentClause}`;
+        const listRes = await driveFetch(token, `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`);
+        const listData = await listRes.json();
+        if (listData.files && listData.files.length > 0) return listData.files[0].id;
+        const meta = { name: folderName, mimeType: 'application/vnd.google-apps.folder' };
+        if (parentId) meta.parents = [parentId];
+        const createRes = await driveFetch(token, 'https://www.googleapis.com/drive/v3/files?fields=id', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(meta)
+        });
+        const created = await createRes.json();
+        return created.id;
+      }
+
+      async function findDriveFileInFolder(token, fileName, folderId) {
+        const q = `name='${fileName}' and '${folderId}' in parents and trashed=false`;
+        const res = await driveFetch(token, `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime)&spaces=drive`);
+        const data = await res.json();
+        return (data.files && data.files.length > 0) ? data.files[0] : null;
+      }
+
+      async function downloadDriveJsonFile(token, fileId) {
+        const res = await driveFetch(token, `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+        return await res.json();
+      }
+
+      async function uploadDriveJsonFile(token, fileName, folderId, jsonObj, existingFileId) {
+        const boundary = '-------zhiguangkb_' + Date.now();
+        const metadata = existingFileId ? { name: fileName } : { name: fileName, parents: [folderId] };
+        const body =
+          `--${boundary}
+Content-Type: application/json; charset=UTF-8
+
+` +
+          JSON.stringify(metadata) +
+          `
+--${boundary}
+Content-Type: application/json; charset=UTF-8
+
+` +
+          JSON.stringify(jsonObj) +
+          `
+--${boundary}--`;
+        const url = existingFileId
+          ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart&fields=id`
+          : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
+        const res = await driveFetch(token, url, {
+          method: existingFileId ? 'PATCH' : 'POST',
+          headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+          body
+        });
+        return await res.json();
+      }
+
+      function mergeCloudDataIntoLocal(remote) {
+        // Merge categories
+        const localCatMap = new Map(state.categories.map(c => [c.id, c]));
+        (remote.categories || []).forEach(rc => {
+          if (!localCatMap.has(rc.id)) state.categories.push(rc);
+        });
+        // Merge cards preserving richer notes, favorites, SRS & newer edits
+        const localCardMap = new Map(state.cards.map(c => [c.id, c]));
+        (remote.cards || []).forEach(rc => {
+          const lc = localCardMap.get(rc.id);
+          if (!lc) {
+            state.cards.push(rc);
+            return;
+          }
+          if (rc.isFavorite) lc.isFavorite = true;
+          if (rc.userEditedNote && !lc.userEditedNote) {
+            lc.myNotes = rc.myNotes;
+            lc.userEditedNote = true;
+          } else if (rc.userEditedNote && lc.userEditedNote && (rc.myNotes || '').trim() && (rc.myNotes || '').trim() !== (lc.myNotes || '').trim()) {
+            lc.myNotes = `${lc.myNotes}
+
+--- [雲端合併筆記] ---
+${rc.myNotes}`;
+          }
+          if (rc.srs && (!lc.srs || (rc.srs.reviewCount || 0) > (lc.srs.reviewCount || 0) || (rc.srs.lastReviewedAt || '') > (lc.srs.lastReviewedAt || ''))) {
+            lc.srs = rc.srs;
+          }
+          const statusRank = { not_started: 0, in_progress: 1, mastered: 2 };
+          if ((statusRank[rc.status] || 0) > (statusRank[lc.status] || 0)) lc.status = rc.status;
+          if ((rc.updatedAt || '') > (lc.updatedAt || '')) {
+            lc.levels = rc.levels || lc.levels;
+            lc.oneLiner = rc.oneLiner || lc.oneLiner;
+            lc.updatedAt = rc.updatedAt;
+          }
+        });
+        // Guarantee all built-in defaults stay present
+        const finalIds = new Set(state.cards.map(c => c.id));
+        DEFAULT_CARDS.forEach(dc => { if (!finalIds.has(dc.id)) state.cards.push(JSON.parse(JSON.stringify(dc))); });
+      }
+
+      function applyCloudOverwriteLocal(remote) {
+        if (Array.isArray(remote.groups) && remote.groups.length) state.groups = remote.groups;
+        if (Array.isArray(remote.categories) && remote.categories.length) state.categories = remote.categories;
+        if (Array.isArray(remote.cards) && remote.cards.length) state.cards = remote.cards;
+        const catIds = new Set(state.categories.map(c => c.id));
+        DEFAULT_CATEGORIES.forEach(dc => { if (!catIds.has(dc.id)) state.categories.push(JSON.parse(JSON.stringify(dc))); });
+        const cardIds = new Set(state.cards.map(c => c.id));
+        DEFAULT_CARDS.forEach(dc => { if (!cardIds.has(dc.id)) state.cards.push(JSON.parse(JSON.stringify(dc))); });
+      }
+
+      function openDriveSyncModal() {
+        const isAuthed = hasValidDriveToken();
+        openModal('Google Drive 手動雲端同步', `
+          <div class="space-y-5">
+            <!-- Status Banner -->
+            <div class="rounded-2xl p-4 border ${state.hasUnsyncedChanges ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50/70 border-emerald-200'}">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div class="text-sm font-bold text-zinc-900">
+                    ${state.hasUnsyncedChanges ? '本機有尚未同步的變更（僅手動觸發同步）' : (state.lastSyncedAt ? '本機與上次同步紀錄一致' : '尚未與 Google Drive 同步')}
+                  </div>
+                  <div class="text-xs text-zinc-600 mt-0.5 mono">
+                    本機最後修改：${esc(state.localModifiedAt || '無')} ｜ 上次雲端同步：${esc(state.lastSyncedAt || '尚未同步')}
+                  </div>
+                </div>
+                <span class="text-xs font-semibold px-2.5 py-1 rounded-full ${isAuthed ? 'bg-emerald-100 text-emerald-700' : 'bg-white border border-zinc-200 text-zinc-600'}">
+                  ${isAuthed ? '已授權連線' : '尚未登入 Google'}
+                </span>
+              </div>
+            </div>
+
+            <!-- Client ID Setup -->
+            <div class="rounded-2xl bg-zinc-50 border border-zinc-200/80 p-4 space-y-2.5">
+              <label class="block text-xs font-bold text-zinc-700">Google OAuth Client ID（僅存於本機瀏覽器，不會寫入網頁原始碼）</label>
+              <div class="flex flex-col sm:flex-row gap-2">
+                <input id="driveClientIdInput" type="text" value="${esc(state.googleClientId || '')}" placeholder="貼上 xxxx.apps.googleusercontent.com"
+                  class="flex-1 px-3.5 py-2 text-sm bg-white border border-zinc-200 rounded-xl focus:outline-none focus:border-[#FF7A00] mono">
+                <button id="btnSaveDriveClientId" type="button" class="btn-pill-ghost px-4 py-2 text-xs sm:text-sm font-semibold shrink-0">儲存 ID</button>
+                <button id="btnDriveAuth" type="button" class="btn-pill-orange px-4 py-2 text-xs sm:text-sm font-semibold shrink-0 flex items-center justify-center gap-1.5">
+                  <i data-lucide="log-in" class="w-4 h-4"></i> ${isAuthed ? '重新授權' : '授權 Google'}
+                </button>
+              </div>
+              <p class="text-[11px] text-zinc-500 leading-relaxed">
+                提示：因為網域同樣是 <code>https://kaychen46.github.io</code>，你可以直接共用 <strong>DriveNote</strong> 的同一個 Google OAuth Client ID，免重設 Google Cloud！資料將獨立存在你 Google Drive 的 <code>ZhiGuangKB/</code> 資料夾，絕不與 DriveNote 衝突。
+              </p>
+            </div>
+
+            <!-- Push & Pull Core Actions -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button id="btnDrivePush" type="button" class="btn-pill-orange py-3 px-4 text-sm font-semibold flex items-center justify-center gap-2">
+                <i data-lucide="cloud-upload" class="w-4 h-4"></i> 同步上傳（寫入雲端＋時間戳快照）
+              </button>
+              <button id="btnDrivePull" type="button" class="btn-pill-ghost py-3 px-4 text-sm font-semibold border-sky-200 text-sky-800 bg-sky-50/50 hover:bg-sky-50 flex items-center justify-center gap-2">
+                <i data-lucide="cloud-download" class="w-4 h-4"></i> 匯入雲端（先預覽再決定覆蓋／合併）
+              </button>
+            </div>
+
+            <!-- Dynamic Status / Conflict / Pull Preview Box -->
+            <div id="driveSyncOutput" class="hidden rounded-2xl border p-4 text-sm"></div>
+          </div>
+        `);
+        refreshIcons();
+
+        const outEl = document.getElementById('driveSyncOutput');
+        function setOutput(html, cls) {
+          if (!outEl) return;
+          outEl.className = 'rounded-2xl border p-4 text-sm ' + (cls || 'bg-zinc-50 border-zinc-200 text-zinc-700');
+          outEl.innerHTML = html;
+          outEl.classList.remove('hidden');
+          refreshIcons();
+        }
+
+        function persistClientIdFromInput() {
+          const inp = document.getElementById('driveClientIdInput');
+          if (inp) {
+            state.googleClientId = inp.value.trim();
+            savePrefs();
+          }
+        }
+
+        document.getElementById('btnSaveDriveClientId')?.addEventListener('click', () => {
+          persistClientIdFromInput();
+          showToast('已儲存 Google OAuth Client ID');
+        });
+
+        document.getElementById('btnDriveAuth')?.addEventListener('click', async () => {
+          persistClientIdFromInput();
+          setOutput('正在開啟 Google 授權視窗...', 'bg-sky-50 border-sky-200 text-sky-800');
+          try {
+            await requestDriveToken('consent');
+            showToast('Google Drive 授權成功！');
+            openDriveSyncModal();
+          } catch (err) {
+            setOutput(`授權失敗：${esc(err.message)}`, 'bg-red-50 border-red-200 text-red-700');
+          }
+        });
+
+        async function executeActualUpload(token, rootFolderId, existingMainFile) {
+          const ts = formatTimestampNow();
+          const payload = {
+            version: 3,
+            syncTimestamp: ts,
+            groups: state.groups,
+            categories: state.categories,
+            cards: state.cards
+          };
+          setOutput(`正在建立時間戳快照 <code>ZhiGuangKB/backups/${ts}.json</code> 並上傳最新資料...`, 'bg-sky-50 border-sky-200 text-sky-800');
+          const backupFolderId = await findOrCreateDriveFolder(token, DRIVE_BACKUP_FOLDER, rootFolderId);
+          await uploadDriveJsonFile(token, `${ts}.json`, backupFolderId, payload, null);
+          await uploadDriveJsonFile(token, DRIVE_DATA_FILENAME, rootFolderId, payload, existingMainFile ? existingMainFile.id : null);
+          state.lastSyncedAt = ts;
+          state.remoteSyncTimestamp = ts;
+          state.hasUnsyncedChanges = false;
+          savePrefs();
+          updateSyncStatusPill();
+          showToast(`同步上傳完成（${ts}）`);
+          setOutput(`
+            <div class="font-bold text-emerald-800 mb-1">同步上傳成功（${esc(ts)}）</div>
+            <div class="text-xs text-emerald-700">已更新 <code>ZhiGuangKB/${DRIVE_DATA_FILENAME}</code>，並自動留存備份快照 <code>ZhiGuangKB/backups/${esc(ts)}.json</code>。</div>
+          `, 'bg-emerald-50 border-emerald-200 text-emerald-800');
+        }
+
+        document.getElementById('btnDrivePush')?.addEventListener('click', async () => {
+          persistClientIdFromInput();
+          setOutput('正在連線 Google Drive 並檢查雲端版本時間戳...', 'bg-sky-50 border-sky-200 text-sky-800');
+          try {
+            const token = await getDriveTokenOrAuth();
+            const rootId = await findOrCreateDriveFolder(token, DRIVE_FOLDER_NAME, null);
+            const existing = await findDriveFileInFolder(token, DRIVE_DATA_FILENAME, rootId);
+            if (existing) {
+              const remoteData = await downloadDriveJsonFile(token, existing.id).catch(() => null);
+              const remoteTs = remoteData && remoteData.syncTimestamp ? String(remoteData.syncTimestamp) : '';
+              const isConflict = remoteTs && (!state.lastSyncedAt || remoteTs > state.lastSyncedAt);
+              if (isConflict) {
+                setOutput(`
+                  <div class="font-bold text-amber-900 mb-1.5">⚠️ 覆蓋衝突防呆提醒：雲端有較新版本！</div>
+                  <p class="text-xs text-amber-800 leading-relaxed mb-3">
+                    雲端最新時間戳為 <strong class="mono">${esc(remoteTs)}</strong>，而本機上次同步時間為 <strong class="mono">${esc(state.lastSyncedAt || '尚未同步')}</strong>。可能是另一台裝置剛上傳過筆記，建議先點「匯入雲端」確認，或確認要以本機資料覆蓋雲端。
+                  </p>
+                  <div class="flex flex-wrap gap-2">
+                    <button id="btnForceDrivePush" type="button" class="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-red-600 text-white hover:bg-red-700 transition">確認仍要覆蓋上傳</button>
+                    <button id="btnCancelDrivePush" type="button" class="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white border border-zinc-300 text-zinc-700">先取消</button>
+                  </div>
+                `, 'bg-amber-50 border-amber-300 text-amber-900');
+                document.getElementById('btnForceDrivePush')?.addEventListener('click', async () => {
+                  try { await executeActualUpload(token, rootId, existing); }
+                  catch (e2) { setOutput(`上傳失敗：${esc(e2.message)}`, 'bg-red-50 border-red-200 text-red-700'); }
+                });
+                document.getElementById('btnCancelDrivePush')?.addEventListener('click', () => { outEl.classList.add('hidden'); });
+                return;
+              }
+            }
+            await executeActualUpload(token, rootId, existing);
+          } catch (err) {
+            setOutput(`同步上傳失敗：${esc(err.message)}`, 'bg-red-50 border-red-200 text-red-700');
+          }
+        });
+
+        document.getElementById('btnDrivePull')?.addEventListener('click', async () => {
+          persistClientIdFromInput();
+          setOutput('正在讀取雲端檔案（唯讀預覽，不會寫回雲端）...', 'bg-sky-50 border-sky-200 text-sky-800');
+          try {
+            const token = await getDriveTokenOrAuth();
+            const rootId = await findOrCreateDriveFolder(token, DRIVE_FOLDER_NAME, null);
+            const existing = await findDriveFileInFolder(token, DRIVE_DATA_FILENAME, rootId);
+            if (!existing) {
+              setOutput('雲端 <code>ZhiGuangKB/</code> 尚未找到同步檔案，請先在有最新筆記的裝置按「同步上傳」。', 'bg-amber-50 border-amber-200 text-amber-800');
+              return;
+            }
+            const remote = await downloadDriveJsonFile(token, existing.id);
+            const rCards = Array.isArray(remote.cards) ? remote.cards : [];
+            const rFav = rCards.filter(c => c.isFavorite).length;
+            const rNotes = rCards.filter(c => c.userEditedNote).length;
+            const rSrs = rCards.filter(c => !!c.srs).length;
+            const rTs = remote.syncTimestamp || existing.modifiedTime || '未知';
+            setOutput(`
+              <div class="font-bold text-zinc-900 mb-1.5">已讀取雲端備份（時間戳：<span class="mono text-sky-700">${esc(rTs)}</span>）</div>
+              <div class="grid grid-cols-4 gap-2 my-2.5 text-center">
+                <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">卡片數</div><div class="mono font-bold text-zinc-900">${rCards.length}</div></div>
+                <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">★ 收藏</div><div class="mono font-bold text-amber-600">${rFav}</div></div>
+                <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">✏️ 自訂筆記</div><div class="mono font-bold text-[#FF7A00]">${rNotes}</div></div>
+                <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">⏰ 複習中</div><div class="mono font-bold text-emerald-600">${rSrs}</div></div>
+              </div>
+              <div class="flex flex-wrap gap-2 mt-3">
+                <button id="btnPullOverwrite" type="button" class="btn-pill-orange px-4 py-2 text-xs font-semibold">以雲端資料覆蓋本機（換電腦推薦）</button>
+                <button id="btnPullMerge" type="button" class="btn-pill-ghost px-4 py-2 text-xs font-semibold">合併雲端與本機（保留兩邊筆記）</button>
+              </div>
+            `, 'bg-sky-50/70 border-sky-200 text-zinc-800');
+
+            document.getElementById('btnPullOverwrite')?.addEventListener('click', () => {
+              applyCloudOverwriteLocal(remote);
+              state.lastSyncedAt = remote.syncTimestamp || formatTimestampNow();
+              state.hasUnsyncedChanges = false;
+              saveData(true);
+              savePrefs();
+              updateSyncStatusPill();
+              closeModal();
+              showToast(`已以雲端資料覆蓋本機（${state.lastSyncedAt}）`);
+              renderAll();
+            });
+            document.getElementById('btnPullMerge')?.addEventListener('click', () => {
+              mergeCloudDataIntoLocal(remote);
+              state.lastSyncedAt = remote.syncTimestamp || state.lastSyncedAt;
+              saveData(false);
+              updateSyncStatusPill();
+              closeModal();
+              showToast('已合併雲端與本機筆記，記得可再按「同步上傳」寫回最新合併版！');
+              renderAll();
+            });
+          } catch (err) {
+            setOutput(`讀取雲端失敗：${esc(err.message)}`, 'bg-red-50 border-red-200 text-red-700');
+          }
         });
       }
 
@@ -4022,6 +4449,7 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
         });
         document.getElementById('btnOpenGenerator')?.addEventListener('click', () => openGeneratorModal());
         document.getElementById('btnOpenUpload')?.addEventListener('click', openUploadModal);
+        document.getElementById('btnOpenDriveSync')?.addEventListener('click', openDriveSyncModal);
         document.getElementById('btnOpenBackup')?.addEventListener('click', openBackupModal);
         document.getElementById('btnFontCycle')?.addEventListener('click', () => {
           state.fontScaleIndex = (state.fontScaleIndex + 1) % FONT_SCALES.length;
@@ -4073,6 +4501,7 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
 
       loadState();
       bindGlobalEvents();
+      updateSyncStatusPill();
       renderAll();
     })();
   </script>
