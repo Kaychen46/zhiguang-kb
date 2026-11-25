@@ -155,8 +155,12 @@
           <i data-lucide="type" class="w-4 h-4"></i>
           <span id="fontLabel" class="hidden xl:inline text-xs">標準字級</span>
         </button>
-        <button id="btnOpenDriveSync" type="button" class="btn-pill-ghost px-3 py-2 text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition" title="Google Drive 手動雲端同步">
-          <i data-lucide="cloud" class="w-4 h-4 text-sky-600 shrink-0"></i>
+        <button id="btnQuickDrivePull" type="button" class="px-3 py-2 rounded-full text-xs sm:text-sm font-semibold flex items-center gap-1.5 border border-sky-200 bg-sky-50/80 text-sky-800 hover:bg-sky-100 transition" title="一鍵讀取 Google Drive 最新雲端資料">
+          <i data-lucide="cloud-download" class="w-4 h-4 text-sky-600 shrink-0"></i>
+          <span class="hidden sm:inline">匯入雲端</span>
+        </button>
+        <button id="btnOpenDriveSync" type="button" class="btn-pill-ghost px-3 py-2 text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition" title="Google Drive 手動同步與設定">
+          <i data-lucide="cloud-upload" class="w-4 h-4 text-[#FF7A00] shrink-0"></i>
           <span id="syncPillText" class="hidden sm:inline">雲端同步</span>
         </button>
         <button id="btnOpenBackup" type="button" class="btn-pill-ghost p-2 text-zinc-700" title="本機 JSON 匯出與重設">
@@ -3146,8 +3150,11 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
               所有群組分類、22 大領域課綱、知識卡與個人筆記皆保存在本機瀏覽器中。隨時可匯出成單一 <code>.json</code> 檔，換電腦時透過「上傳教材」匯入即可完整還原。
             </p>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <button id="btnExportAllJson" type="button" class="btn-pill-orange py-3 px-4 text-sm font-semibold flex items-center justify-center gap-2">
-                <i data-lucide="download" class="w-4 h-4"></i> 匯出完整知識庫 (.json)
+              <button id="btnExportDeltaJson" type="button" class="btn-pill-orange py-3 px-4 text-sm font-semibold flex items-center justify-center gap-2">
+                <i data-lucide="sparkles" class="w-4 h-4"></i> 匯出輕量個人異動檔 (.json)
+              </button>
+              <button id="btnExportAllJson" type="button" class="btn-pill-ghost py-3 px-4 text-sm font-semibold flex items-center justify-center gap-2">
+                <i data-lucide="download" class="w-4 h-4"></i> 匯出完整 352 篇備份 (.json)
               </button>
               <button id="btnResetDefault" type="button" class="btn-pill-ghost py-3 px-4 text-sm font-semibold text-red-600 border-red-200 hover:bg-red-50 flex items-center justify-center gap-2">
                 <i data-lucide="rotate-ccw" class="w-4 h-4"></i> 重設為預設 22 大領域資料
@@ -3155,6 +3162,21 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
             </div>
           </div>
         `);
+
+        document.getElementById('btnExportDeltaJson')?.addEventListener('click', () => {
+          const ts = formatTimestampNow();
+          const payload = JSON.stringify(buildPersonalDeltaPayload(ts), null, 2);
+          const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `zhiguang-kb-delta-${ts}.json`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          showToast('已下載輕量個人異動檔（僅含筆記、收藏、複習與新增／改寫卡片）');
+        });
 
         document.getElementById('btnExportAllJson')?.addEventListener('click', () => {
           const payload = JSON.stringify({ exportedAt: new Date().toISOString(), groups: state.groups, categories: state.categories, cards: state.cards }, null, 2);
@@ -3184,12 +3206,229 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
       }
 
       // =========================================================================
-      // GOOGLE DRIVE MANUAL SYNC & SAFETY WORKFLOW (DriveNote v6 Architecture)
+      // GOOGLE DRIVE LIGHTWEIGHT DELTA SYNC & SELECTABLE FILE PICKER (v4)
       // =========================================================================
       const DRIVE_FOLDER_NAME = 'ZhiGuangKB';
       const DRIVE_BACKUP_FOLDER = 'backups';
-      const DRIVE_DATA_FILENAME = 'zhiguang_kb_data.json';
+      const DRIVE_DELTA_FILENAME = 'zhiguang_kb_delta.json';
       const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+
+      const DEFAULT_GROUP_MAP = new Map(DEFAULT_GROUPS.map(g => [g.id, g]));
+      const DEFAULT_CAT_MAP = new Map(DEFAULT_CATEGORIES.map(c => [c.id, c]));
+      const DEFAULT_CARD_MAP = new Map(DEFAULT_CARDS.map(c => [c.id, c]));
+
+      function buildPersonalDeltaPayload(tsOverride) {
+        const ts = tsOverride || formatTimestampNow();
+        const customGroups = state.groups.filter(g => !DEFAULT_GROUP_MAP.has(g.id));
+        const customCategories = state.categories.filter(c => {
+          const dc = DEFAULT_CAT_MAP.get(c.id);
+          if (!dc) return true;
+          return JSON.stringify(c) !== JSON.stringify(dc);
+        });
+
+        const currentIds = new Set(state.cards.map(c => c.id));
+        const deletedDefaultCardIds = DEFAULT_CARDS.filter(dc => !currentIds.has(dc.id)).map(dc => dc.id);
+
+        const cardPatches = {};
+        const customCards = [];
+        let notesCount = 0;
+        let favCount = 0;
+        let srsCount = 0;
+        let editedContentCount = 0;
+
+        state.cards.forEach(c => {
+          const dc = DEFAULT_CARD_MAP.get(c.id);
+          if (!dc) {
+            customCards.push(JSON.parse(JSON.stringify(c)));
+            if (c.userEditedNote || (c.myNotes || '').trim()) notesCount++;
+            if (c.isFavorite) favCount++;
+            if (c.srs) srsCount++;
+            return;
+          }
+          const patch = {};
+          let changed = false;
+
+          if (c.isFavorite) { patch.isFavorite = true; favCount++; changed = true; }
+          if (c.srs) { patch.srs = c.srs; srsCount++; changed = true; }
+          if (c.status && c.status !== dc.status) { patch.status = c.status; changed = true; }
+          if (c.userEditedNote || (c.myNotes || '') !== (dc.myNotes || '')) {
+            patch.myNotes = c.myNotes || '';
+            patch.userEditedNote = true;
+            notesCount++;
+            changed = true;
+          }
+          const contentChanged =
+            c.title !== dc.title ||
+            c.oneLiner !== dc.oneLiner ||
+            c.subtopic !== dc.subtopic ||
+            c.categoryId !== dc.categoryId ||
+            c.stageId !== dc.stageId ||
+            JSON.stringify(c.levels || {}) !== JSON.stringify(dc.levels || {}) ||
+            JSON.stringify(c.tags || []) !== JSON.stringify(dc.tags || []);
+          if (contentChanged) {
+            patch.title = c.title;
+            patch.oneLiner = c.oneLiner;
+            patch.subtopic = c.subtopic;
+            patch.categoryId = c.categoryId;
+            patch.stageId = c.stageId;
+            patch.levels = c.levels;
+            patch.tags = c.tags;
+            editedContentCount++;
+            changed = true;
+          }
+          if (changed) {
+            patch.updatedAt = c.updatedAt || todayStr();
+            cardPatches[c.id] = patch;
+          }
+        });
+
+        return {
+          version: 4,
+          type: 'zhiguang_kb_delta',
+          syncTimestamp: ts,
+          summary: {
+            notesCount,
+            favCount,
+            srsCount,
+            editedContentCount,
+            patchedDefaultCount: Object.keys(cardPatches).length,
+            customCardsCount: customCards.length,
+            customCategoriesCount: customCategories.length,
+            deletedCount: deletedDefaultCardIds.length
+          },
+          customGroups,
+          customCategories,
+          deletedDefaultCardIds,
+          cardPatches,
+          customCards
+        };
+      }
+
+      function applyDeltaPayload(payload, mode) {
+        // Supports both v4 lightweight delta AND legacy v3 full backup transparently!
+        if (!payload || typeof payload !== 'object') throw new Error('無效的同步檔案格式');
+
+        if (payload.type === 'zhiguang_kb_delta') {
+          if (mode === 'overwrite') {
+            // Reset cleanly to latest built-in 352 defaults, then apply chosen personal delta
+            resetToDefaultsInMemory();
+            if (Array.isArray(payload.customGroups)) {
+              payload.customGroups.forEach(g => {
+                if (!state.groups.some(x => x.id === g.id)) state.groups.push(JSON.parse(JSON.stringify(g)));
+              });
+            }
+            if (Array.isArray(payload.customCategories)) {
+              payload.customCategories.forEach(c => {
+                const idx = state.categories.findIndex(x => x.id === c.id);
+                if (idx >= 0) state.categories[idx] = JSON.parse(JSON.stringify(c));
+                else state.categories.push(JSON.parse(JSON.stringify(c)));
+              });
+            }
+            const delSet = new Set(payload.deletedDefaultCardIds || []);
+            if (delSet.size) state.cards = state.cards.filter(c => !delSet.has(c.id));
+
+            const patches = payload.cardPatches || {};
+            state.cards.forEach(c => {
+              const p = patches[c.id];
+              if (p) Object.assign(c, JSON.parse(JSON.stringify(p)));
+            });
+            if (Array.isArray(payload.customCards)) {
+              payload.customCards.forEach(cc => {
+                if (!state.cards.some(x => x.id === cc.id)) state.cards.push(JSON.parse(JSON.stringify(cc)));
+              });
+            }
+          } else {
+            // Merge delta cleanly onto current local state
+            (payload.customGroups || []).forEach(g => {
+              if (!state.groups.some(x => x.id === g.id)) state.groups.push(JSON.parse(JSON.stringify(g)));
+            });
+            (payload.customCategories || []).forEach(c => {
+              if (!state.categories.some(x => x.id === c.id)) state.categories.push(JSON.parse(JSON.stringify(c)));
+            });
+            const localMap = new Map(state.cards.map(c => [c.id, c]));
+            const patches = payload.cardPatches || {};
+            Object.entries(patches).forEach(([cid, p]) => {
+              const lc = localMap.get(cid);
+              if (!lc) return;
+              if (p.isFavorite) lc.isFavorite = true;
+              if (p.userEditedNote) {
+                if (!lc.userEditedNote) {
+                  lc.myNotes = p.myNotes;
+                  lc.userEditedNote = true;
+                } else if ((p.myNotes || '').trim() && (p.myNotes || '').trim() !== (lc.myNotes || '').trim()) {
+                  lc.myNotes = `${lc.myNotes}
+
+--- [匯入同步筆記] ---
+${p.myNotes}`;
+                }
+              }
+              if (p.srs && (!lc.srs || (p.srs.reviewCount || 0) >= (lc.srs.reviewCount || 0))) lc.srs = JSON.parse(JSON.stringify(p.srs));
+              const rank = { not_started: 0, in_progress: 1, mastered: 2 };
+              if (p.status && (rank[p.status] || 0) > (rank[lc.status] || 0)) lc.status = p.status;
+              if (p.levels && (p.updatedAt || '') >= (lc.updatedAt || '')) {
+                lc.title = p.title || lc.title;
+                lc.oneLiner = p.oneLiner || lc.oneLiner;
+                lc.levels = p.levels;
+                lc.tags = p.tags || lc.tags;
+                lc.updatedAt = p.updatedAt;
+              }
+            });
+            (payload.customCards || []).forEach(cc => {
+              const existing = localMap.get(cc.id);
+              if (!existing) {
+                state.cards.push(JSON.parse(JSON.stringify(cc)));
+              } else if ((cc.updatedAt || '') > (existing.updatedAt || '')) {
+                Object.assign(existing, JSON.parse(JSON.stringify(cc)));
+              }
+            });
+          }
+          return;
+        }
+
+        // Legacy full-backup JSON fallback
+        if (Array.isArray(payload.cards)) {
+          if (mode === 'overwrite') {
+            if (Array.isArray(payload.groups) && payload.groups.length) state.groups = payload.groups;
+            if (Array.isArray(payload.categories) && payload.categories.length) state.categories = payload.categories;
+            state.cards = payload.cards;
+            const catIds = new Set(state.categories.map(c => c.id));
+            DEFAULT_CATEGORIES.forEach(dc => { if (!catIds.has(dc.id)) state.categories.push(JSON.parse(JSON.stringify(dc))); });
+            const cardIds = new Set(state.cards.map(c => c.id));
+            DEFAULT_CARDS.forEach(dc => { if (!cardIds.has(dc.id)) state.cards.push(JSON.parse(JSON.stringify(dc))); });
+          } else {
+            const localMap = new Map(state.cards.map(c => [c.id, c]));
+            payload.cards.forEach(rc => {
+              const lc = localMap.get(rc.id);
+              if (!lc) { state.cards.push(rc); return; }
+              if (rc.isFavorite) lc.isFavorite = true;
+              if (rc.userEditedNote && !lc.userEditedNote) { lc.myNotes = rc.myNotes; lc.userEditedNote = true; }
+              if (rc.srs && (!lc.srs || (rc.srs.reviewCount || 0) > (lc.srs.reviewCount || 0))) lc.srs = rc.srs;
+            });
+          }
+        }
+      }
+
+      function summarizeAnyPayload(payload) {
+        if (payload && payload.type === 'zhiguang_kb_delta' && payload.summary) {
+          return {
+            isDelta: true,
+            ts: payload.syncTimestamp || '未知',
+            notes: payload.summary.notesCount || 0,
+            favs: payload.summary.favCount || 0,
+            srs: payload.summary.srsCount || 0,
+            custom: (payload.summary.customCardsCount || 0) + (payload.summary.editedContentCount || 0)
+          };
+        }
+        const arr = Array.isArray(payload?.cards) ? payload.cards : [];
+        return {
+          isDelta: false,
+          ts: payload?.syncTimestamp || payload?.exportedAt?.slice(0, 16) || '未知',
+          notes: arr.filter(c => c.userEditedNote).length,
+          favs: arr.filter(c => c.isFavorite).length,
+          srs: arr.filter(c => !!c.srs).length,
+          custom: arr.filter(c => !DEFAULT_CARD_MAP.has(c.id)).length
+        };
+      }
 
       function hasValidDriveToken() {
         return !!(state.driveAccessToken && Date.now() < state.driveTokenExpiresAt - 30000);
@@ -3198,10 +3437,7 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
       function requestDriveToken(promptMode) {
         return new Promise((resolve, reject) => {
           const cid = (state.googleClientId || '').trim();
-          if (!cid) {
-            reject(new Error('請先輸入並儲存 Google OAuth Client ID'));
-            return;
-          }
+          if (!cid) { reject(new Error('請先輸入並儲存 Google OAuth Client ID')); return; }
           if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
             reject(new Error('Google 登入元件尚未載入完成，請確認網路連線後重試'));
             return;
@@ -3219,14 +3455,10 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
                   reject(new Error((resp && (resp.error_description || resp.error)) || 'Google 授權未完成'));
                 }
               },
-              error_callback: (err) => {
-                reject(new Error((err && err.message) || 'Google 授權視窗已關閉或被阻擋'));
-              }
+              error_callback: (err) => { reject(new Error((err && err.message) || 'Google 授權視窗已關閉或被阻擋')); }
             });
             client.requestAccessToken({ prompt: promptMode || '' });
-          } catch (e) {
-            reject(e);
-          }
+          } catch (e) { reject(e); }
         });
       }
 
@@ -3265,9 +3497,29 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
 
       async function findDriveFileInFolder(token, fileName, folderId) {
         const q = `name='${fileName}' and '${folderId}' in parents and trashed=false`;
-        const res = await driveFetch(token, `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime)&spaces=drive`);
+        const res = await driveFetch(token, `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,size)&spaces=drive`);
         const data = await res.json();
         return (data.files && data.files.length > 0) ? data.files[0] : null;
+      }
+
+      async function listSyncFilesInDrive(token, rootId) {
+        const files = [];
+        const qMain = `'${rootId}' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false`;
+        const r1 = await driveFetch(token, `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(qMain)}&orderBy=modifiedTime desc&pageSize=20&fields=files(id,name,modifiedTime,size)&spaces=drive`);
+        const d1 = await r1.json();
+        (d1.files || []).forEach(f => { if (f.name.endsWith('.json')) files.push(Object.assign({ folderLabel: '最新主檔' }, f)); });
+
+        const qBkFolder = `name='${DRIVE_BACKUP_FOLDER}' and '${rootId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+        const rBk = await driveFetch(token, `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(qBkFolder)}&fields=files(id)&spaces=drive`);
+        const dBk = await rBk.json();
+        if (dBk.files && dBk.files.length > 0) {
+          const bkId = dBk.files[0].id;
+          const qSnaps = `'${bkId}' in parents and trashed=false`;
+          const r2 = await driveFetch(token, `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(qSnaps)}&orderBy=modifiedTime desc&pageSize=30&fields=files(id,name,modifiedTime,size)&spaces=drive`);
+          const d2 = await r2.json();
+          (d2.files || []).forEach(f => { if (f.name.endsWith('.json')) files.push(Object.assign({ folderLabel: '歷史快照' }, f)); });
+        }
+        return files;
       }
 
       async function downloadDriveJsonFile(token, fileId) {
@@ -3303,104 +3555,65 @@ Content-Type: application/json; charset=UTF-8
         return await res.json();
       }
 
-      function mergeCloudDataIntoLocal(remote) {
-        // Merge categories
-        const localCatMap = new Map(state.categories.map(c => [c.id, c]));
-        (remote.categories || []).forEach(rc => {
-          if (!localCatMap.has(rc.id)) state.categories.push(rc);
-        });
-        // Merge cards preserving richer notes, favorites, SRS & newer edits
-        const localCardMap = new Map(state.cards.map(c => [c.id, c]));
-        (remote.cards || []).forEach(rc => {
-          const lc = localCardMap.get(rc.id);
-          if (!lc) {
-            state.cards.push(rc);
-            return;
-          }
-          if (rc.isFavorite) lc.isFavorite = true;
-          if (rc.userEditedNote && !lc.userEditedNote) {
-            lc.myNotes = rc.myNotes;
-            lc.userEditedNote = true;
-          } else if (rc.userEditedNote && lc.userEditedNote && (rc.myNotes || '').trim() && (rc.myNotes || '').trim() !== (lc.myNotes || '').trim()) {
-            lc.myNotes = `${lc.myNotes}
-
---- [雲端合併筆記] ---
-${rc.myNotes}`;
-          }
-          if (rc.srs && (!lc.srs || (rc.srs.reviewCount || 0) > (lc.srs.reviewCount || 0) || (rc.srs.lastReviewedAt || '') > (lc.srs.lastReviewedAt || ''))) {
-            lc.srs = rc.srs;
-          }
-          const statusRank = { not_started: 0, in_progress: 1, mastered: 2 };
-          if ((statusRank[rc.status] || 0) > (statusRank[lc.status] || 0)) lc.status = rc.status;
-          if ((rc.updatedAt || '') > (lc.updatedAt || '')) {
-            lc.levels = rc.levels || lc.levels;
-            lc.oneLiner = rc.oneLiner || lc.oneLiner;
-            lc.updatedAt = rc.updatedAt;
-          }
-        });
-        // Guarantee all built-in defaults stay present
-        const finalIds = new Set(state.cards.map(c => c.id));
-        DEFAULT_CARDS.forEach(dc => { if (!finalIds.has(dc.id)) state.cards.push(JSON.parse(JSON.stringify(dc))); });
-      }
-
-      function applyCloudOverwriteLocal(remote) {
-        if (Array.isArray(remote.groups) && remote.groups.length) state.groups = remote.groups;
-        if (Array.isArray(remote.categories) && remote.categories.length) state.categories = remote.categories;
-        if (Array.isArray(remote.cards) && remote.cards.length) state.cards = remote.cards;
-        const catIds = new Set(state.categories.map(c => c.id));
-        DEFAULT_CATEGORIES.forEach(dc => { if (!catIds.has(dc.id)) state.categories.push(JSON.parse(JSON.stringify(dc))); });
-        const cardIds = new Set(state.cards.map(c => c.id));
-        DEFAULT_CARDS.forEach(dc => { if (!cardIds.has(dc.id)) state.cards.push(JSON.parse(JSON.stringify(dc))); });
-      }
-
-      function openDriveSyncModal() {
+      function openDriveSyncModal(autoPull) {
         const isAuthed = hasValidDriveToken();
-        openModal('Google Drive 手動雲端同步', `
-          <div class="space-y-5">
-            <!-- Status Banner -->
+        const localDelta = buildPersonalDeltaPayload();
+        const localBytes = new Blob([JSON.stringify(localDelta)]).size;
+        const localKb = Math.max(1, Math.round(localBytes / 1024));
+
+        openModal('Google Drive 輕量差異同步（可自選檔案）', `
+          <div class="space-y-4">
+            <!-- Local Personal Delta Summary -->
             <div class="rounded-2xl p-4 border ${state.hasUnsyncedChanges ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50/70 border-emerald-200'}">
-              <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
                 <div>
                   <div class="text-sm font-bold text-zinc-900">
-                    ${state.hasUnsyncedChanges ? '本機有尚未同步的變更（僅手動觸發同步）' : (state.lastSyncedAt ? '本機與上次同步紀錄一致' : '尚未與 Google Drive 同步')}
+                    ${state.hasUnsyncedChanges ? '本機有未同步的個人異動（僅上傳差異檔，約 ' + localKb + ' KB）' : (state.lastSyncedAt ? '本機個人異動與上次同步一致' : '只同步個人筆記、收藏、複習與新增／修改卡片（約 ' + localKb + ' KB）')}
                   </div>
                   <div class="text-xs text-zinc-600 mt-0.5 mono">
                     本機最後修改：${esc(state.localModifiedAt || '無')} ｜ 上次雲端同步：${esc(state.lastSyncedAt || '尚未同步')}
                   </div>
                 </div>
                 <span class="text-xs font-semibold px-2.5 py-1 rounded-full ${isAuthed ? 'bg-emerald-100 text-emerald-700' : 'bg-white border border-zinc-200 text-zinc-600'}">
-                  ${isAuthed ? '已授權連線' : '尚未登入 Google'}
+                  ${isAuthed ? '已授權 Google' : '尚未登入'}
                 </span>
+              </div>
+              <div class="flex flex-wrap gap-2 text-xs text-zinc-700">
+                <span class="px-2.5 py-1 rounded-full bg-white/80 border border-zinc-200">✏️ 自訂筆記 <strong>${localDelta.summary.notesCount}</strong></span>
+                <span class="px-2.5 py-1 rounded-full bg-white/80 border border-zinc-200">★ 收藏 <strong>${localDelta.summary.favCount}</strong></span>
+                <span class="px-2.5 py-1 rounded-full bg-white/80 border border-zinc-200">⏰ 複習排程 <strong>${localDelta.summary.srsCount}</strong></span>
+                <span class="px-2.5 py-1 rounded-full bg-white/80 border border-zinc-200">➕ 新增／改寫卡片 <strong>${localDelta.summary.customCardsCount + localDelta.summary.editedContentCount}</strong></span>
               </div>
             </div>
 
             <!-- Client ID Setup -->
-            <div class="rounded-2xl bg-zinc-50 border border-zinc-200/80 p-4 space-y-2.5">
-              <label class="block text-xs font-bold text-zinc-700">Google OAuth Client ID（僅存於本機瀏覽器，不會寫入網頁原始碼）</label>
+            <div class="rounded-2xl bg-zinc-50 border border-zinc-200/80 p-3.5 space-y-2">
+              <label class="block text-xs font-bold text-zinc-700">Google OAuth Client ID（可共用 DriveNote 同一個 ID，僅存於本機）</label>
               <div class="flex flex-col sm:flex-row gap-2">
                 <input id="driveClientIdInput" type="text" value="${esc(state.googleClientId || '')}" placeholder="貼上 xxxx.apps.googleusercontent.com"
-                  class="flex-1 px-3.5 py-2 text-sm bg-white border border-zinc-200 rounded-xl focus:outline-none focus:border-[#FF7A00] mono">
-                <button id="btnSaveDriveClientId" type="button" class="btn-pill-ghost px-4 py-2 text-xs sm:text-sm font-semibold shrink-0">儲存 ID</button>
-                <button id="btnDriveAuth" type="button" class="btn-pill-orange px-4 py-2 text-xs sm:text-sm font-semibold shrink-0 flex items-center justify-center gap-1.5">
-                  <i data-lucide="log-in" class="w-4 h-4"></i> ${isAuthed ? '重新授權' : '授權 Google'}
+                  class="flex-1 px-3 py-2 text-xs sm:text-sm bg-white border border-zinc-200 rounded-xl focus:outline-none focus:border-[#FF7A00] mono">
+                <button id="btnSaveDriveClientId" type="button" class="btn-pill-ghost px-3.5 py-2 text-xs font-semibold shrink-0">儲存 ID</button>
+                <button id="btnDriveAuth" type="button" class="btn-pill-orange px-3.5 py-2 text-xs font-semibold shrink-0 flex items-center justify-center gap-1">
+                  <i data-lucide="log-in" class="w-3.5 h-3.5"></i> ${isAuthed ? '重新授權' : '授權 Google'}
                 </button>
               </div>
-              <p class="text-[11px] text-zinc-500 leading-relaxed">
-                提示：因為網域同樣是 <code>https://kaychen46.github.io</code>，你可以直接共用 <strong>DriveNote</strong> 的同一個 Google OAuth Client ID，免重設 Google Cloud！資料將獨立存在你 Google Drive 的 <code>ZhiGuangKB/</code> 資料夾，絕不與 DriveNote 衝突。
-              </p>
             </div>
 
-            <!-- Push & Pull Core Actions -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <button id="btnDrivePush" type="button" class="btn-pill-orange py-3 px-4 text-sm font-semibold flex items-center justify-center gap-2">
-                <i data-lucide="cloud-upload" class="w-4 h-4"></i> 同步上傳（寫入雲端＋時間戳快照）
+            <!-- Core Actions -->
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <button id="btnDrivePush" type="button" class="btn-pill-orange py-2.5 px-3 text-xs sm:text-sm font-semibold flex items-center justify-center gap-1.5">
+                <i data-lucide="cloud-upload" class="w-4 h-4"></i> 上傳個人異動
               </button>
-              <button id="btnDrivePull" type="button" class="btn-pill-ghost py-3 px-4 text-sm font-semibold border-sky-200 text-sky-800 bg-sky-50/50 hover:bg-sky-50 flex items-center justify-center gap-2">
-                <i data-lucide="cloud-download" class="w-4 h-4"></i> 匯入雲端（先預覽再決定覆蓋／合併）
+              <button id="btnDriveListFiles" type="button" class="btn-pill-ghost py-2.5 px-3 text-xs sm:text-sm font-semibold border-sky-200 text-sky-800 bg-sky-50/60 hover:bg-sky-100 flex items-center justify-center gap-1.5">
+                <i data-lucide="folder-open" class="w-4 h-4"></i> 選擇雲端同步檔
               </button>
+              <label class="btn-pill-ghost py-2.5 px-3 text-xs sm:text-sm font-semibold flex items-center justify-center gap-1.5 cursor-pointer">
+                <i data-lucide="file-json" class="w-4 h-4 text-[#FF7A00]"></i> 選擇本機異動檔
+                <input id="localDeltaFileInput" type="file" accept=".json" class="hidden">
+              </label>
             </div>
 
-            <!-- Dynamic Status / Conflict / Pull Preview Box -->
+            <!-- Dynamic File Picker / Preview Box -->
             <div id="driveSyncOutput" class="hidden rounded-2xl border p-4 text-sm"></div>
           </div>
         `);
@@ -3417,10 +3630,49 @@ ${rc.myNotes}`;
 
         function persistClientIdFromInput() {
           const inp = document.getElementById('driveClientIdInput');
-          if (inp) {
-            state.googleClientId = inp.value.trim();
+          if (inp) { state.googleClientId = inp.value.trim(); savePrefs(); }
+        }
+
+        function renderPayloadPreviewAndApply(payload, sourceLabel) {
+          const s = summarizeAnyPayload(payload);
+          setOutput(`
+            <div class="font-bold text-zinc-900 mb-1">
+              已選擇同步檔：<span class="text-sky-700">${esc(sourceLabel)}</span>
+              <span class="ml-1.5 text-[11px] px-2 py-0.5 rounded-full ${s.isDelta ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-200 text-zinc-700'}">${s.isDelta ? '輕量異動檔' : '完整備份檔'}</span>
+            </div>
+            <div class="text-xs text-zinc-500 mono mb-2.5">檔案時間戳：${esc(s.ts)}</div>
+            <div class="grid grid-cols-4 gap-2 my-2 text-center">
+              <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">✏️ 自訂筆記</div><div class="mono font-bold text-[#FF7A00]">${s.notes}</div></div>
+              <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">★ 收藏</div><div class="mono font-bold text-amber-600">${s.favs}</div></div>
+              <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">⏰ 複習排程</div><div class="mono font-bold text-emerald-600">${s.srs}</div></div>
+              <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">➕ 新增／改寫</div><div class="mono font-bold text-sky-700">${s.custom}</div></div>
+            </div>
+            <div class="flex flex-wrap gap-2 mt-3">
+              <button id="btnApplyDeltaOverwrite" type="button" class="btn-pill-orange px-4 py-2 text-xs font-semibold">套用此檔個人異動（換電腦／還原推薦）</button>
+              <button id="btnApplyDeltaMerge" type="button" class="btn-pill-ghost px-4 py-2 text-xs font-semibold">與本機合併（保留兩邊筆記與新增）</button>
+            </div>
+          `, 'bg-sky-50/70 border-sky-200 text-zinc-800');
+
+          document.getElementById('btnApplyDeltaOverwrite')?.addEventListener('click', () => {
+            applyDeltaPayload(payload, 'overwrite');
+            state.lastSyncedAt = payload.syncTimestamp || formatTimestampNow();
+            state.hasUnsyncedChanges = false;
+            saveData(true);
             savePrefs();
-          }
+            updateSyncStatusPill();
+            closeModal();
+            showToast(`已套用「${sourceLabel}」的個人異動資料！`);
+            renderAll();
+          });
+          document.getElementById('btnApplyDeltaMerge')?.addEventListener('click', () => {
+            applyDeltaPayload(payload, 'merge');
+            state.lastSyncedAt = payload.syncTimestamp || state.lastSyncedAt;
+            saveData(false);
+            updateSyncStatusPill();
+            closeModal();
+            showToast(`已將「${sourceLabel}」合併至本機筆記！`);
+            renderAll();
+          });
         }
 
         document.getElementById('btnSaveDriveClientId')?.addEventListener('click', () => {
@@ -3434,53 +3686,64 @@ ${rc.myNotes}`;
           try {
             await requestDriveToken('consent');
             showToast('Google Drive 授權成功！');
-            openDriveSyncModal();
+            openDriveSyncModal(false);
           } catch (err) {
             setOutput(`授權失敗：${esc(err.message)}`, 'bg-red-50 border-red-200 text-red-700');
           }
         });
 
-        async function executeActualUpload(token, rootFolderId, existingMainFile) {
-          const ts = formatTimestampNow();
-          const payload = {
-            version: 3,
-            syncTimestamp: ts,
-            groups: state.groups,
-            categories: state.categories,
-            cards: state.cards
+        // Local JSON delta/backup file picker
+        document.getElementById('localDeltaFileInput')?.addEventListener('change', (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            try {
+              const parsed = JSON.parse(String(reader.result || ''));
+              renderPayloadPreviewAndApply(parsed, file.name);
+            } catch (err) {
+              setOutput('讀取本機檔案失敗：請確認選擇的是有效的 .json 同步檔。', 'bg-red-50 border-red-200 text-red-700');
+            }
           };
-          setOutput(`正在建立時間戳快照 <code>ZhiGuangKB/backups/${ts}.json</code> 並上傳最新資料...`, 'bg-sky-50 border-sky-200 text-sky-800');
+          reader.readAsText(file, 'utf-8');
+        });
+
+        async function executeDeltaUpload(token, rootFolderId, existingMainFile) {
+          const ts = formatTimestampNow();
+          const payload = buildPersonalDeltaPayload(ts);
+          const kb = Math.max(1, Math.round(new Blob([JSON.stringify(payload)]).size / 1024));
+          setOutput(`正在上傳輕量異動檔（約 ${kb} KB）並建立歷史快照 <code>ZhiGuangKB/backups/${ts}.json</code>...`, 'bg-sky-50 border-sky-200 text-sky-800');
           const backupFolderId = await findOrCreateDriveFolder(token, DRIVE_BACKUP_FOLDER, rootFolderId);
           await uploadDriveJsonFile(token, `${ts}.json`, backupFolderId, payload, null);
-          await uploadDriveJsonFile(token, DRIVE_DATA_FILENAME, rootFolderId, payload, existingMainFile ? existingMainFile.id : null);
+          await uploadDriveJsonFile(token, DRIVE_DELTA_FILENAME, rootFolderId, payload, existingMainFile ? existingMainFile.id : null);
           state.lastSyncedAt = ts;
           state.remoteSyncTimestamp = ts;
           state.hasUnsyncedChanges = false;
           savePrefs();
           updateSyncStatusPill();
-          showToast(`同步上傳完成（${ts}）`);
+          showToast(`個人異動已上傳（${ts}，約 ${kb} KB）`);
           setOutput(`
-            <div class="font-bold text-emerald-800 mb-1">同步上傳成功（${esc(ts)}）</div>
-            <div class="text-xs text-emerald-700">已更新 <code>ZhiGuangKB/${DRIVE_DATA_FILENAME}</code>，並自動留存備份快照 <code>ZhiGuangKB/backups/${esc(ts)}.json</code>。</div>
+            <div class="font-bold text-emerald-800 mb-1">輕量異動上傳成功（${esc(ts)}・約 ${kb} KB）</div>
+            <div class="text-xs text-emerald-700">已更新 <code>ZhiGuangKB/${DRIVE_DELTA_FILENAME}</code>，並建立可自選回溯快照 <code>ZhiGuangKB/backups/${esc(ts)}.json</code>。</div>
           `, 'bg-emerald-50 border-emerald-200 text-emerald-800');
         }
 
         document.getElementById('btnDrivePush')?.addEventListener('click', async () => {
           persistClientIdFromInput();
-          setOutput('正在連線 Google Drive 並檢查雲端版本時間戳...', 'bg-sky-50 border-sky-200 text-sky-800');
+          setOutput('正在檢查雲端異動檔時間戳...', 'bg-sky-50 border-sky-200 text-sky-800');
           try {
             const token = await getDriveTokenOrAuth();
             const rootId = await findOrCreateDriveFolder(token, DRIVE_FOLDER_NAME, null);
-            const existing = await findDriveFileInFolder(token, DRIVE_DATA_FILENAME, rootId);
+            const existing = await findDriveFileInFolder(token, DRIVE_DELTA_FILENAME, rootId);
             if (existing) {
               const remoteData = await downloadDriveJsonFile(token, existing.id).catch(() => null);
               const remoteTs = remoteData && remoteData.syncTimestamp ? String(remoteData.syncTimestamp) : '';
               const isConflict = remoteTs && (!state.lastSyncedAt || remoteTs > state.lastSyncedAt);
               if (isConflict) {
                 setOutput(`
-                  <div class="font-bold text-amber-900 mb-1.5">⚠️ 覆蓋衝突防呆提醒：雲端有較新版本！</div>
+                  <div class="font-bold text-amber-900 mb-1.5">⚠️ 衝突防呆：雲端異動檔（${esc(remoteTs)}）比本機上次同步更新！</div>
                   <p class="text-xs text-amber-800 leading-relaxed mb-3">
-                    雲端最新時間戳為 <strong class="mono">${esc(remoteTs)}</strong>，而本機上次同步時間為 <strong class="mono">${esc(state.lastSyncedAt || '尚未同步')}</strong>。可能是另一台裝置剛上傳過筆記，建議先點「匯入雲端」確認，或確認要以本機資料覆蓋雲端。
+                    建議先點「選擇雲端同步檔」合併最新筆記，或確認以本機個人異動覆蓋主檔（系統仍會保留歷史快照）。
                   </p>
                   <div class="flex flex-wrap gap-2">
                     <button id="btnForceDrivePush" type="button" class="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-red-600 text-white hover:bg-red-700 transition">確認仍要覆蓋上傳</button>
@@ -3488,74 +3751,80 @@ ${rc.myNotes}`;
                   </div>
                 `, 'bg-amber-50 border-amber-300 text-amber-900');
                 document.getElementById('btnForceDrivePush')?.addEventListener('click', async () => {
-                  try { await executeActualUpload(token, rootId, existing); }
+                  try { await executeDeltaUpload(token, rootId, existing); }
                   catch (e2) { setOutput(`上傳失敗：${esc(e2.message)}`, 'bg-red-50 border-red-200 text-red-700'); }
                 });
                 document.getElementById('btnCancelDrivePush')?.addEventListener('click', () => { outEl.classList.add('hidden'); });
                 return;
               }
             }
-            await executeActualUpload(token, rootId, existing);
+            await executeDeltaUpload(token, rootId, existing);
           } catch (err) {
-            setOutput(`同步上傳失敗：${esc(err.message)}`, 'bg-red-50 border-red-200 text-red-700');
+            setOutput(`上傳失敗：${esc(err.message)}`, 'bg-red-50 border-red-200 text-red-700');
           }
         });
 
-        document.getElementById('btnDrivePull')?.addEventListener('click', async () => {
+        // Selectable Cloud File Picker!
+        document.getElementById('btnDriveListFiles')?.addEventListener('click', async () => {
           persistClientIdFromInput();
-          setOutput('正在讀取雲端檔案（唯讀預覽，不會寫回雲端）...', 'bg-sky-50 border-sky-200 text-sky-800');
+          setOutput('正在列出 Google Drive <code>ZhiGuangKB/</code> 中所有可匯入的同步檔案...', 'bg-sky-50 border-sky-200 text-sky-800');
           try {
             const token = await getDriveTokenOrAuth();
             const rootId = await findOrCreateDriveFolder(token, DRIVE_FOLDER_NAME, null);
-            const existing = await findDriveFileInFolder(token, DRIVE_DATA_FILENAME, rootId);
-            if (!existing) {
-              setOutput('雲端 <code>ZhiGuangKB/</code> 尚未找到同步檔案，請先在有最新筆記的裝置按「同步上傳」。', 'bg-amber-50 border-amber-200 text-amber-800');
+            const files = await listSyncFilesInDrive(token, rootId);
+            if (!files.length) {
+              setOutput('雲端 <code>ZhiGuangKB/</code> 目前還沒有任何同步檔。請先按「上傳個人異動」，或使用右側「選擇本機異動檔」匯入。', 'bg-amber-50 border-amber-200 text-amber-800');
               return;
             }
-            const remote = await downloadDriveJsonFile(token, existing.id);
-            const rCards = Array.isArray(remote.cards) ? remote.cards : [];
-            const rFav = rCards.filter(c => c.isFavorite).length;
-            const rNotes = rCards.filter(c => c.userEditedNote).length;
-            const rSrs = rCards.filter(c => !!c.srs).length;
-            const rTs = remote.syncTimestamp || existing.modifiedTime || '未知';
             setOutput(`
-              <div class="font-bold text-zinc-900 mb-1.5">已讀取雲端備份（時間戳：<span class="mono text-sky-700">${esc(rTs)}</span>）</div>
-              <div class="grid grid-cols-4 gap-2 my-2.5 text-center">
-                <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">卡片數</div><div class="mono font-bold text-zinc-900">${rCards.length}</div></div>
-                <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">★ 收藏</div><div class="mono font-bold text-amber-600">${rFav}</div></div>
-                <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">✏️ 自訂筆記</div><div class="mono font-bold text-[#FF7A00]">${rNotes}</div></div>
-                <div class="bg-white rounded-xl p-2 border border-zinc-200"><div class="text-[11px] text-zinc-500">⏰ 複習中</div><div class="mono font-bold text-emerald-600">${rSrs}</div></div>
+              <div class="font-bold text-zinc-900 mb-2">請選擇要匯入的雲端同步檔案（共 ${files.length} 個）：</div>
+              <div class="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                ${files.map(f => {
+                  const kb = f.size ? Math.max(1, Math.round(Number(f.size) / 1024)) + ' KB' : '';
+                  const mod = f.modifiedTime ? f.modifiedTime.replace('T', ' ').slice(0, 16) : '';
+                  return `
+                    <button type="button" data-pick-file-id="${esc(f.id)}" data-pick-file-name="${esc(f.name)}"
+                      class="pick-drive-file-btn w-full text-left px-3.5 py-2.5 rounded-xl bg-white border border-zinc-200 hover:border-[#FF7A00] hover:bg-orange-50/40 transition flex items-center justify-between gap-2">
+                      <div class="min-w-0">
+                        <div class="flex items-center gap-1.5">
+                          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${f.folderLabel === '最新主檔' ? 'bg-orange-100 text-[#C2410C]' : 'bg-zinc-100 text-zinc-600'}">${esc(f.folderLabel)}</span>
+                          <span class="font-bold text-xs sm:text-sm text-zinc-900 mono truncate">${esc(f.name)}</span>
+                        </div>
+                        <div class="text-[11px] text-zinc-500 mt-0.5 mono">修改時間：${esc(mod)} ${kb ? '｜' + kb : ''}</div>
+                      </div>
+                      <span class="text-xs font-semibold text-sky-700 shrink-0">預覽匯入 →</span>
+                    </button>
+                  `;
+                }).join('')}
               </div>
-              <div class="flex flex-wrap gap-2 mt-3">
-                <button id="btnPullOverwrite" type="button" class="btn-pill-orange px-4 py-2 text-xs font-semibold">以雲端資料覆蓋本機（換電腦推薦）</button>
-                <button id="btnPullMerge" type="button" class="btn-pill-ghost px-4 py-2 text-xs font-semibold">合併雲端與本機（保留兩邊筆記）</button>
-              </div>
-            `, 'bg-sky-50/70 border-sky-200 text-zinc-800');
+            `, 'bg-zinc-50 border-zinc-200 text-zinc-800');
 
-            document.getElementById('btnPullOverwrite')?.addEventListener('click', () => {
-              applyCloudOverwriteLocal(remote);
-              state.lastSyncedAt = remote.syncTimestamp || formatTimestampNow();
-              state.hasUnsyncedChanges = false;
-              saveData(true);
-              savePrefs();
-              updateSyncStatusPill();
-              closeModal();
-              showToast(`已以雲端資料覆蓋本機（${state.lastSyncedAt}）`);
-              renderAll();
-            });
-            document.getElementById('btnPullMerge')?.addEventListener('click', () => {
-              mergeCloudDataIntoLocal(remote);
-              state.lastSyncedAt = remote.syncTimestamp || state.lastSyncedAt;
-              saveData(false);
-              updateSyncStatusPill();
-              closeModal();
-              showToast('已合併雲端與本機筆記，記得可再按「同步上傳」寫回最新合併版！');
-              renderAll();
+            outEl.querySelectorAll('.pick-drive-file-btn').forEach(btn => {
+              btn.addEventListener('click', async () => {
+                const fid = btn.getAttribute('data-pick-file-id');
+                const fname = btn.getAttribute('data-pick-file-name');
+                setOutput(`正在讀取 <code>${esc(fname)}</code> 內容預覽...`, 'bg-sky-50 border-sky-200 text-sky-800');
+                try {
+                  const remotePayload = await downloadDriveJsonFile(token, fid);
+                  renderPayloadPreviewAndApply(remotePayload, fname);
+                } catch (e3) {
+                  setOutput(`讀取檔案失敗：${esc(e3.message)}`, 'bg-red-50 border-red-200 text-red-700');
+                }
+              });
             });
           } catch (err) {
-            setOutput(`讀取雲端失敗：${esc(err.message)}`, 'bg-red-50 border-red-200 text-red-700');
+            setOutput(`列出雲端檔案失敗：${esc(err.message)}`, 'bg-red-50 border-red-200 text-red-700');
           }
         });
+
+        if (autoPull) {
+          if ((state.googleClientId || '').trim()) {
+            document.getElementById('btnDriveListFiles')?.click();
+          } else {
+            setOutput('請先貼上 Google OAuth Client ID 後按「選擇雲端同步檔」，或直接按右側「選擇本機異動檔」挑選 .json 檔案匯入。', 'bg-sky-50 border-sky-200 text-sky-800');
+            document.getElementById('driveClientIdInput')?.focus();
+          }
+        }
       }
 
       // =========================================================================
@@ -4449,7 +4718,8 @@ ${rc.myNotes}`;
         });
         document.getElementById('btnOpenGenerator')?.addEventListener('click', () => openGeneratorModal());
         document.getElementById('btnOpenUpload')?.addEventListener('click', openUploadModal);
-        document.getElementById('btnOpenDriveSync')?.addEventListener('click', openDriveSyncModal);
+        document.getElementById('btnQuickDrivePull')?.addEventListener('click', () => openDriveSyncModal(true));
+        document.getElementById('btnOpenDriveSync')?.addEventListener('click', () => openDriveSyncModal(false));
         document.getElementById('btnOpenBackup')?.addEventListener('click', openBackupModal);
         document.getElementById('btnFontCycle')?.addEventListener('click', () => {
           state.fontScaleIndex = (state.fontScaleIndex + 1) % FONT_SCALES.length;
