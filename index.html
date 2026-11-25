@@ -1373,6 +1373,15 @@
         } catch (e) {
           resetToDefaultsInMemory();
         }
+        // Auto-detect previously edited notes so they immediately appear in Dashboard & Custom badge
+        const defMap = new Map(DEFAULT_CARDS.map(dc => [dc.id, dc]));
+        state.cards.forEach(c => {
+          const cur = (c.myNotes || '').trim();
+          const dc = defMap.get(c.id);
+          if (cur && (!dc || cur !== (dc.myNotes || '').trim())) {
+            c.userEditedNote = true;
+          }
+        });
         applyFontScale();
       }
 
@@ -2460,7 +2469,7 @@
               <div class="flex items-center justify-between mb-2">
                 <h2 class="text-base font-bold text-zinc-900 flex items-center gap-2">
                   <i data-lucide="notebook-pen" class="w-4 h-4 text-[#FF7A00]"></i> 我的心得與個人筆記（即時存檔）
-                  ${card.userEditedNote ? '<span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-orange-50 text-[#C2410C]">已自訂</span>' : ''}
+                  <span id="customNoteBadge" class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-orange-50 text-[#C2410C] ${hasCustomNote(card) ? '' : 'hidden'}">已自訂</span>
                 </h2>
                 <span id="noteSavedHint" class="text-xs text-emerald-600 font-medium opacity-0 transition-opacity">已自動儲存</span>
               </div>
@@ -2575,9 +2584,13 @@
         let noteTimer = null;
         document.getElementById('quickNotesInput')?.addEventListener('input', (e) => {
           card.myNotes = e.target.value;
-          card.userEditedNote = e.target.value.trim().length > 0;
+          const dc = DEFAULT_CARD_MAP.get(card.id);
+          const curTrim = e.target.value.trim();
+          card.userEditedNote = curTrim.length > 0 && (!dc || curTrim !== (dc.myNotes || '').trim());
           card.updatedAt = new Date().toISOString().slice(0, 10);
           saveData();
+          const badge = document.getElementById('customNoteBadge');
+          if (badge) badge.classList.toggle('hidden', !hasCustomNote(card));
           const hint = document.getElementById('noteSavedHint');
           if (hint) {
             hint.style.opacity = '1';
@@ -2699,6 +2712,8 @@
             lv3: document.getElementById('edLv3').value.trim()
           };
           card.myNotes = document.getElementById('edNotes').value.trim();
+          const defOrig = DEFAULT_CARD_MAP.get(card.id);
+          card.userEditedNote = card.myNotes.length > 0 && (!defOrig || card.myNotes !== (defOrig.myNotes || '').trim());
           card.updatedAt = new Date().toISOString().slice(0, 10);
           state.selectedCategoryId = card.categoryId;
           state.isEditingCard = false;
@@ -3216,6 +3231,16 @@ ${src ? '- 參考教材：\n' + src + '\n' : ''}
       const DEFAULT_GROUP_MAP = new Map(DEFAULT_GROUPS.map(g => [g.id, g]));
       const DEFAULT_CAT_MAP = new Map(DEFAULT_CATEGORIES.map(c => [c.id, c]));
       const DEFAULT_CARD_MAP = new Map(DEFAULT_CARDS.map(c => [c.id, c]));
+
+      function hasCustomNote(card) {
+        if (!card) return false;
+        const cur = (card.myNotes || '').trim();
+        if (!cur) return false;
+        if (card.userEditedNote) return true;
+        const dc = DEFAULT_CARD_MAP.get(card.id);
+        if (!dc) return true;
+        return cur !== (dc.myNotes || '').trim();
+      }
 
       function buildPersonalDeltaPayload(tsOverride) {
         const ts = tsOverride || formatTimestampNow();
@@ -3836,7 +3861,7 @@ Content-Type: application/json; charset=UTF-8
         const inProgress = state.cards.filter(c => c.status === 'in_progress').length;
         const notStarted = state.cards.filter(c => !c.status || c.status === 'not_started').length;
         const favCount = state.cards.filter(c => c.isFavorite).length;
-        const editedNotesCount = state.cards.filter(c => c.userEditedNote).length;
+        const editedNotesCount = state.cards.filter(c => hasCustomNote(c)).length;
         const dueCount = getDueCards().length;
         const srsTotal = state.cards.filter(c => !!c.srs).length;
         const masteryPct = total ? Math.round((mastered / total) * 100) : 0;
@@ -3849,7 +3874,7 @@ Content-Type: application/json; charset=UTF-8
             if (!cat || cat.groupId !== state.dashGroupFilter) return false;
           }
           if (state.dashFilter === 'fav' && !c.isFavorite) return false;
-          if (state.dashFilter === 'edited_notes' && !c.userEditedNote) return false;
+          if (state.dashFilter === 'edited_notes' && !hasCustomNote(c)) return false;
           if (state.dashFilter === 'in_progress' && c.status !== 'in_progress') return false;
           if (state.dashFilter === 'mastered' && c.status !== 'mastered') return false;
           if (state.dashFilter === 'not_started' && c.status && c.status !== 'not_started') return false;
@@ -3999,7 +4024,7 @@ Content-Type: application/json; charset=UTF-8
                           <p class="text-xs text-zinc-600 line-clamp-2 mt-1">${esc(c.oneLiner)}</p>
                         </button>
                       </div>
-                      ${c.userEditedNote && c.myNotes ? `
+                      ${hasCustomNote(c) ? `
                         <div class="text-xs bg-orange-50/70 text-zinc-700 rounded-xl px-3 py-2 border border-orange-100 line-clamp-2">
                           <strong class="text-[#C2410C]">我的筆記：</strong>${esc(c.myNotes)}
                         </div>
